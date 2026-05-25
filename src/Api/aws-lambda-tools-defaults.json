@@ -1,0 +1,17 @@
+{
+  "Information": [
+    "https://github.com/aws/aws-lambda-dotnet"
+  ],
+  "profile": "",
+  "region": "us-east-1",
+  "configuration": "Release",
+  "function-architecture": "x86_64",
+  "function-runtime": "dotnet8",
+  "function-memory-size": 512,
+  "function-timeout": 30,
+  "function-handler": "ProductsApi.Api",
+  "framework": "net8.0",
+  "s3-prefix": "ProductsApi/",
+  "template": "serverless.template",
+  "msbuild-parameters": "--self-contained false"
+}

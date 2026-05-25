@@ -1,0 +1,210 @@
+name: CD
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        default: dev
+        type: choice
+        options: [dev, int, prod]
+      run_smoke_test:
+        description: "Run smoke test after deploy"
+        type: boolean
+        default: true
+
+# Least-privilege GITHUB_TOKEN
+permissions:
+  contents: read
+  id-token: write   # OIDC token for AWS role assumption
+
+# Only one CD per environment at a time
+concurrency:
+  group: cd-${{ inputs.environment || 'dev' }}
+  cancel-in-progress: false
+
+env:
+  DOTNET_VERSION: "8.0.x"
+  TERRAFORM_VERSION: "1.9.8"
+  AWS_REGION: us-east-1
+  TF_ENV: ${{ inputs.environment || 'dev' }}
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    outputs:
+      artifact-name: ${{ steps.artifact.outputs.name }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore & Build
+        run: dotnet build ProductsApi.sln -c Release --no-incremental
+
+      - name: Run tests
+        run: |
+          dotnet test ProductsApi.sln \
+            --no-build -c Release \
+            --logger "trx;LogFileName=results.trx" \
+            --results-directory ./test-results
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-cd
+          path: test-results/
+
+      - name: Publish Lambda artifact
+        run: |
+          dotnet publish src/Api/Api.csproj \
+            -c Release \
+            -r linux-x64 \
+            --no-self-contained \
+            -o artifacts/publish
+
+      - name: Package as ZIP
+        id: artifact
+        run: |
+          cd artifacts/publish
+          zip -r ../lambda.zip .
+          cd ../..
+          echo "name=lambda-${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Lambda ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: lambda-${{ github.sha }}
+          path: artifacts/lambda.zip
+          retention-days: 7
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  deploy-dev:
+    name: Deploy → dev
+    needs: build
+    runs-on: ubuntu-latest
+    environment: dev-us-east-1  # GitHub Environment with optional protection rules
+    if: env.TF_ENV == 'dev' || github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Lambda artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: lambda-${{ github.sha }}
+          path: artifacts/
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN_DEV }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: cd-deploy-dev-${{ github.run_id }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: |
+          terraform init \
+            -backend-config=envs/dev.backend.hcl \
+            -input=false
+
+      - name: Terraform Apply
+        working-directory: terraform
+        run: |
+          terraform apply \
+            -var-file=envs/dev.tfvars \
+            -var="lambda_artifact_path=../artifacts/lambda.zip" \
+            -auto-approve \
+            -input=false
+
+      - name: Get API endpoint
+        id: api
+        working-directory: terraform
+        run: |
+          echo "endpoint=$(terraform output -raw api_endpoint)" >> "$GITHUB_OUTPUT"
+          echo "function=$(terraform output -raw lambda_function_name)" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke test
+        if: ${{ inputs.run_smoke_test != false }}
+        run: |
+          echo "Smoke testing: ${{ steps.api.outputs.endpoint }}"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            "${{ steps.api.outputs.endpoint }}/health/live")
+          if [ "$STATUS" != "200" ]; then
+            echo "Smoke test FAILED: health/live returned $STATUS"
+            exit 1
+          fi
+          echo "Smoke test PASSED"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # prod deploy requires manual approval via GitHub Environment protection rules
+  deploy-prod:
+    name: Deploy → prod
+    needs: [build, deploy-dev]
+    runs-on: ubuntu-latest
+    environment: prod-us-east-1   # configure required reviewers in repo settings
+    if: ${{ inputs.environment == 'prod' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Lambda artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: lambda-${{ github.sha }}
+          path: artifacts/
+
+      - name: Configure AWS credentials (OIDC — prod)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN_PROD }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: cd-deploy-prod-${{ github.run_id }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: terraform init -backend-config=envs/prod.backend.hcl -input=false
+
+      - name: Terraform Plan (safety check before prod apply)
+        working-directory: terraform
+        run: |
+          terraform plan \
+            -var-file=envs/prod.tfvars \
+            -var="lambda_artifact_path=../artifacts/lambda.zip" \
+            -input=false -detailed-exitcode
+
+      - name: Terraform Apply
+        working-directory: terraform
+        run: |
+          terraform apply \
+            -var-file=envs/prod.tfvars \
+            -var="lambda_artifact_path=../artifacts/lambda.zip" \
+            -auto-approve -input=false
+
+      - name: Smoke test (prod)
+        id: api
+        working-directory: terraform
+        run: |
+          ENDPOINT=$(terraform output -raw api_endpoint)
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$ENDPOINT/health/live")
+          echo "Health check returned: $STATUS"
+          [ "$STATUS" = "200" ] || exit 1

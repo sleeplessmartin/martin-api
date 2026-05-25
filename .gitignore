@@ -1,0 +1,43 @@
+## .NET
+bin/
+obj/
+*.user
+.vs/
+.vscode/settings.json
+TestResults/
+test-results/
+artifacts/
+*.nupkg
+*.snupkg
+
+## Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.backup
+*.tfplan
+tfplan
+plan.txt
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+## Secrets — never commit these
+*.env
+.env.*
+secrets.json
+appsettings.*.Local.json
+
+## macOS
+.DS_Store
+
+## JetBrains
+.idea/
+
+## VS Code
+.vscode/
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json

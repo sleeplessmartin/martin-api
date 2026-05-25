@@ -1,0 +1,126 @@
+# Reusable infrastructure workflow — called from ci.yml / cd.yml or standalone
+# Usage:
+#   jobs:
+#     infra:
+#       uses: ./.github/workflows/infrastructure.yml
+#       with:
+#         environment: dev
+#         apply: false
+#       secrets: inherit
+
+name: Infrastructure (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "Target environment (dev | int | prod)"
+        required: true
+        type: string
+      terraform_version:
+        description: "Terraform CLI version"
+        required: false
+        type: string
+        default: "1.9.8"
+      aws_region:
+        description: "AWS region"
+        required: false
+        type: string
+        default: "us-east-1"
+      apply:
+        description: "Run terraform apply (true) or plan-only (false)"
+        required: false
+        type: boolean
+        default: false
+      artifact_name:
+        description: "Name of the uploaded Lambda ZIP artifact"
+        required: false
+        type: string
+        default: ""
+    secrets:
+      AWS_ROLE_ARN:
+        description: "IAM role ARN to assume via OIDC"
+        required: true
+    outputs:
+      api_endpoint:
+        description: "Deployed API endpoint URL"
+        value: ${{ jobs.terraform.outputs.api_endpoint }}
+      function_name:
+        description: "Lambda function name"
+        value: ${{ jobs.terraform.outputs.function_name }}
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+jobs:
+  terraform:
+    name: Terraform ${{ inputs.apply && 'Apply' || 'Plan' }} → ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    outputs:
+      api_endpoint: ${{ steps.outputs.outputs.api_endpoint }}
+      function_name: ${{ steps.outputs.outputs.function_name }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Lambda artifact
+        if: inputs.artifact_name != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: artifacts/
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ inputs.aws_region }}
+          role-session-name: tf-${{ inputs.environment }}-${{ github.run_id }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+
+      - name: Terraform Format Check
+        working-directory: terraform
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: |
+          terraform init \
+            -backend-config=envs/${{ inputs.environment }}.backend.hcl \
+            -input=false
+
+      - name: Terraform Validate
+        working-directory: terraform
+        run: terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: terraform
+        run: |
+          ARTIFACT_PATH="${{ inputs.artifact_name != '' && '../artifacts/lambda.zip' || '/dev/null' }}"
+          terraform plan \
+            -var-file=envs/${{ inputs.environment }}.tfvars \
+            -var="lambda_artifact_path=${ARTIFACT_PATH}" \
+            -input=false \
+            -no-color \
+            -out=tfplan 2>&1 | tee plan.txt
+        continue-on-error: true
+
+      - name: Terraform Apply
+        if: inputs.apply == true
+        working-directory: terraform
+        run: terraform apply tfplan
+
+      - name: Capture outputs
+        id: outputs
+        if: inputs.apply == true
+        working-directory: terraform
+        run: |
+          echo "api_endpoint=$(terraform output -raw api_endpoint)" >> "$GITHUB_OUTPUT"
+          echo "function_name=$(terraform output -raw lambda_function_name)" >> "$GITHUB_OUTPUT"

@@ -1,0 +1,164 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - ".editorconfig"
+      - ".gitignore"
+
+# Least-privilege GITHUB_TOKEN permissions
+permissions:
+  contents: read
+  pull-requests: write  # needed to post Terraform plan comment
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_VERSION: "8.0.x"
+  TERRAFORM_VERSION: "1.9.8"
+  TF_ENV: dev
+  AWS_REGION: us-east-1
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-and-test:
+    name: Build & Test (.NET)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET ${{ env.DOTNET_VERSION }}
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore dependencies
+        run: dotnet restore ProductsApi.sln
+
+      - name: Build (treat warnings as errors)
+        run: dotnet build ProductsApi.sln --no-restore -c Release
+
+      - name: Run unit tests with coverage
+        run: |
+          dotnet test ProductsApi.sln \
+            --no-build \
+            --configuration Release \
+            --logger "trx;LogFileName=results.trx" \
+            --results-directory ./test-results \
+            --collect:"XPlat Code Coverage" \
+            --settings tests/coverlet.runsettings \
+            -- DataCollectionRunSettings.DataCollectors.DataCollector.Configuration.Format=cobertura
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: test-results/
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: "**/coverage.cobertura.xml"
+
+      # Post a coverage summary to the PR
+      - name: Coverage summary (PR comment)
+        if: github.event_name == 'pull_request'
+        uses: irongut/CodeCoverageSummary@v1.3.0
+        with:
+          filename: "**/coverage.cobertura.xml"
+          badge: true
+          format: markdown
+          output: both
+          thresholds: "60 80"
+
+      - name: Add coverage comment to PR
+        if: github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          recreate: true
+          path: code-coverage-results.md
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  terraform-validate:
+    name: Terraform Validate & Plan
+    runs-on: ubuntu-latest
+    # Read-only AWS credentials for plan — no apply on PRs
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write # OIDC
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Terraform ${{ env.TERRAFORM_VERSION }}
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform Format Check
+        working-directory: terraform
+        run: terraform fmt -check -recursive -diff
+
+      - name: Configure AWS credentials (OIDC — read-only plan role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: ci-tf-plan-${{ github.run_id }}
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: |
+          terraform init \
+            -backend-config=envs/${{ env.TF_ENV }}.backend.hcl \
+            -input=false
+
+      - name: Terraform Validate
+        working-directory: terraform
+        run: terraform validate
+
+      - name: Terraform Plan
+        id: tf-plan
+        working-directory: terraform
+        run: |
+          terraform plan \
+            -var-file=envs/${{ env.TF_ENV }}.tfvars \
+            -var="lambda_artifact_path=../artifacts/lambda.zip" \
+            -input=false \
+            -no-color \
+            -out=tfplan 2>&1 | tee plan.txt
+          echo "exitcode=$?" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
+
+      - name: Post Terraform Plan to PR
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('terraform/plan.txt', 'utf8');
+            const truncated = plan.length > 60000 ? plan.substring(0, 60000) + '\n...[truncated]' : plan;
+            const comment = `## Terraform Plan (${process.env.TF_ENV})
+            \`\`\`hcl
+            ${truncated}
+            \`\`\`
+            > Workflow: \`${{ github.workflow }}\` | Run: [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+      - name: Fail if plan errored
+        if: steps.tf-plan.outputs.exitcode == '1'
+        run: exit 1
