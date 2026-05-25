@@ -1,7 +1,7 @@
 # ProductsApi
 
 Production-grade REST API built with **.NET 8** and **C#**, deployed on **AWS Lambda** behind **API Gateway HTTP API (v2)**.
-Clean Architecture · CQRS · DynamoDB · Terraform · GitHub Actions OIDC · OpenTelemetry
+Clean Architecture · CQRS · DynamoDB · Terraform · GitHub Actions OIDC · OpenTelemetry · Swagger UI
 
 ---
 
@@ -82,19 +82,38 @@ cd src/Api
 dotnet run
 ```
 
-### 3. Test the API
+### 3. Swagger UI
+
+Swagger is available in the `Development` environment only — it is never exposed when running on Lambda.
+
+```bash
+ASPNETCORE_ENVIRONMENT=Development dotnet run \
+  --project src/Api/Api.csproj \
+  --urls http://localhost:5050
+```
+
+Then open **[http://localhost:5050/swagger](http://localhost:5050/swagger)** in your browser.
+
+| URL | Description |
+|-----|-------------|
+| `/swagger` | Interactive Swagger UI |
+| `/swagger/v1/swagger.json` | Raw OpenAPI 3.0 JSON spec |
+
+To test protected endpoints from the UI, click **Authorize** and paste a JWT token (without the `Bearer ` prefix).
+
+### 4. Test the API via curl
 
 ```bash
 # Health check
-curl http://localhost:5001/health/live
+curl http://localhost:5050/health/live
 
-# Create a product (no auth in dev by default)
-curl -X POST http://localhost:5001/api/v1/products \
+# Create a product
+curl -X POST http://localhost:5050/api/v1/products \
   -H "Content-Type: application/json" \
   -d '{"name":"Widget Pro","description":"The best widget","price":29.99,"currency":"USD"}'
 
 # List products
-curl http://localhost:5001/api/v1/products
+curl "http://localhost:5050/api/v1/products?pageSize=10"
 ```
 
 ---
@@ -163,6 +182,12 @@ Infrastructure → Application (implements interfaces)
 - **Structured JSON logs** via Serilog. Every log line carries `CorrelationId`, `RequestId`, `Environment`, and `Application` properties — filterable in CloudWatch Insights.
 - **OpenTelemetry** hooks are wired for traces and metrics. In production, swap `AddConsoleExporter()` for `AddOtlpExporter()` pointed at your collector (e.g., AWS Distro for OpenTelemetry → X-Ray + CloudWatch).
 - **CloudWatch alarms** for Lambda error count, P99 duration, and DynamoDB system errors are provisioned by Terraform.
+
+### Swagger / OpenAPI
+
+- **Swashbuckle.AspNetCore** generates the OpenAPI 3.0 spec from the minimal API endpoint metadata (`.WithSummary()`, `.WithTags()`, `.Produces<T>()`).
+- The UI and JSON spec are served only when `ASPNETCORE_ENVIRONMENT=Development` — the middleware block is behind `if (app.Environment.IsDevelopment())` so it is never active on Lambda.
+- A **Bearer auth definition** is included so you can paste a JWT directly in the Swagger UI and test protected endpoints without needing a separate HTTP client.
 
 ---
 
@@ -246,6 +271,8 @@ terraform apply -var-file=envs/prod.tfvars -var="lambda_artifact_path=../artifac
 
 ## API Reference
 
+> **Tip:** Run the app locally and browse to [http://localhost:5050/swagger](http://localhost:5050/swagger) for a live, interactive version of this reference.
+
 Base URL: `https://{api-id}.execute-api.{region}.amazonaws.com/api/v1`
 
 | Method | Path | Auth | Description |
@@ -305,6 +332,16 @@ MediatR scans the Assembly passed to `RegisterServicesFromAssembly`. Ensure new 
 ### JWT 401 on local
 
 Set `UseInMemoryDatabase: true` and configure a test auth scheme (the `Api.UnitTests` shows the pattern). For real JWT testing locally, use a tool like [mock-oauth2-server](https://github.com/navikt/mock-oauth2-server).
+
+### Swagger UI returns 404
+
+The UI is only registered in the `Development` environment. Make sure you launch with:
+
+```bash
+ASPNETCORE_ENVIRONMENT=Development dotnet run --project src/Api/Api.csproj
+```
+
+Running `dotnet run` without the env var defaults to `Production`, where the middleware is not registered.
 
 ### Terraform plan shows no changes but Lambda code is stale
 
