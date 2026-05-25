@@ -155,7 +155,7 @@ jobs:
   # prod deploy requires manual approval via GitHub Environment protection rules
   deploy-prod:
     name: Deploy → prod
-    needs: [build, deploy-dev]
+    needs: [build]
     runs-on: ubuntu-latest
     environment: prod-us-east-1   # configure required reviewers in repo settings
     if: ${{ inputs.environment == 'prod' }}
