@@ -1,6 +1,7 @@
 using Amazon.Lambda.AspNetCoreServer.Hosting;
 using Asp.Versioning;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.OpenApi.Models;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
@@ -43,6 +44,40 @@ try
         o.ApiVersionReader = new UrlSegmentApiVersionReader();
     });
 
+    // ── Swagger / OpenAPI ─────────────────────────────────────────────────────
+    builder.Services.AddEndpointsApiExplorer();
+    builder.Services.AddSwaggerGen(o =>
+    {
+        o.SwaggerDoc("v1", new OpenApiInfo
+        {
+            Title = "Products API",
+            Version = "v1",
+            Description = "Production-grade Products REST API — Clean Architecture on AWS Lambda"
+        });
+
+        // JWT auth button in Swagger UI
+        var bearer = new OpenApiSecurityScheme
+        {
+            Type = SecuritySchemeType.Http,
+            Scheme = "bearer",
+            BearerFormat = "JWT",
+            In = ParameterLocation.Header,
+            Name = "Authorization",
+            Description = "Paste your JWT token (without the 'Bearer ' prefix)"
+        };
+        o.AddSecurityDefinition("Bearer", bearer);
+        o.AddSecurityRequirement(new OpenApiSecurityRequirement
+        {
+            {
+                new OpenApiSecurityScheme
+                {
+                    Reference = new OpenApiReference { Type = ReferenceType.SecurityScheme, Id = "Bearer" }
+                },
+                Array.Empty<string>()
+            }
+        });
+    });
+
     // ── Application + Infrastructure ─────────────────────────────────────────
     builder.Services.AddApplication();
     builder.Services.AddInfrastructure(builder.Configuration);
@@ -78,13 +113,17 @@ try
             t.AddAspNetCoreInstrumentation()
              .AddSource("ProductsApi.*");
             if (builder.Environment.IsDevelopment())
+            {
                 t.AddConsoleExporter();
+            }
         })
         .WithMetrics(m =>
         {
             m.AddAspNetCoreInstrumentation();
             if (builder.Environment.IsDevelopment())
+            {
                 m.AddConsoleExporter();
+            }
         });
 
     // ── Health Checks ─────────────────────────────────────────────────────────
@@ -96,6 +135,17 @@ try
 
     var app = builder.Build();
 
+    // ── Swagger UI (local dev only — never exposed on Lambda) ─────────────────
+    if (app.Environment.IsDevelopment())
+    {
+        app.UseSwagger();
+        app.UseSwaggerUI(o =>
+        {
+            o.SwaggerEndpoint("/swagger/v1/swagger.json", "Products API v1");
+            o.RoutePrefix = "swagger";
+        });
+    }
+
     // ── Middleware Pipeline ───────────────────────────────────────────────────
     app.UseExceptionHandler();
     app.UseSerilogRequestLogging(o =>
@@ -106,7 +156,9 @@ try
             diag.Set("RequestHost", ctx.Request.Host.Value);
             diag.Set("RequestScheme", ctx.Request.Scheme);
             if (ctx.Items.TryGetValue("CorrelationId", out var id))
+            {
                 diag.Set("CorrelationId", id);
+            }
         };
     });
 
