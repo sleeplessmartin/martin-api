@@ -17,7 +17,9 @@ public sealed class InMemoryProductRepository : IProductRepository
     {
         var skip = 0;
         if (!string.IsNullOrEmpty(nextPageToken) && int.TryParse(nextPageToken, out var parsed))
+        {
             skip = parsed;
+        }
 
         var all = _store.Values.OrderBy(p => p.CreatedAt).ToList();
         var page = all.Skip(skip).Take(pageSize).ToList().AsReadOnly();
