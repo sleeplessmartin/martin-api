@@ -191,6 +191,49 @@ Infrastructure → Application (implements interfaces)
 
 ---
 
+## Terraform in This Application — Simple Explanation
+
+### What Terraform Is Doing
+
+- Terraform is a tool that automatically sets up and manages cloud infrastructure on Amazon Web Services (AWS)
+- Instead of clicking buttons in the AWS console, Terraform reads configuration files and creates everything described in them
+- It acts like a blueprint for building the infrastructure the application needs to run
+
+### Entry Point (Main Files)
+
+- [terraform/main.tf](terraform/main.tf) — This is the main Terraform file. It's where Terraform starts and defines all the major pieces
+- The other `.tf` files (`variables.tf`, `locals.tf`, `dynamodb.tf`) support `main.tf` by providing settings, naming rules, and database definitions
+
+### Overall Flow (What Terraform Does)
+
+1. You tell Terraform which environment you want (dev or prod) by providing a configuration file from [terraform/envs/](terraform/envs/)
+2. Terraform reads `main.tf` to understand what needs to be created
+3. Terraform looks at `variables.tf` to understand what inputs are needed (like environment name, memory size, etc.)
+4. Terraform looks at `locals.tf` to get naming rules (so all resources follow the same naming pattern)
+5. Terraform calls two modules (like pre-built templates):
+   - [modules/lambda](terraform/modules/lambda/) — Sets up the serverless function that runs your C# application
+   - [modules/api_gateway](terraform/modules/api_gateway/) — Sets up the public web interface (like a front door) so people can call your API
+6. Terraform creates the DynamoDB database (a cloud database) defined in `dynamodb.tf`
+7. Terraform saves important information (like the API endpoint address) into AWS SSM for future use
+
+### Key Folders & Files
+
+| Path | Purpose |
+|------|---------|
+| [terraform/main.tf](terraform/main.tf) | Main orchestration file — does the overall setup |
+| [terraform/variables.tf](terraform/variables.tf) | Defines all the settings and options that can be customized |
+| [terraform/locals.tf](terraform/locals.tf) | Defines naming rules and common tags applied to everything |
+| [terraform/dynamodb.tf](terraform/dynamodb.tf) | Defines the database table and its settings |
+| [terraform/modules/lambda/](terraform/modules/lambda/) | Template for how to set up the serverless function |
+| [terraform/modules/api_gateway/](terraform/modules/api_gateway/) | Template for how to set up the API gateway (web interface) |
+| [terraform/envs/](terraform/envs/) | Configuration files for dev and prod environments (`dev.tfvars`, `prod.tfvars`, etc.) — tell Terraform which settings to use for each environment |
+
+### Simple Summary
+
+> Terraform reads a blueprint (the `.tf` files) → Creates AWS cloud resources → Sets up a serverless API that can run your C# application
+
+---
+
 ## Terraform Deploy
 
 ### One-time bootstrap
